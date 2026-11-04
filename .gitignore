@@ -1,0 +1,9 @@
+# build output (made by zipit.sh)
+wboss.zip
+
+# saved copies of the NYT page, used for debugging
+wordle.html
+wordle_files/
+
+node_modules/
+.DS_Store
