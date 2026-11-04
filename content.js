@@ -30,19 +30,65 @@ async function loadWords() {
 }
 await loadWords()
 console.log('loaded words...')
+// NYT uses CSS modules with hashed class names (e.g. Board-module_boardContainer__TBHNL),
+// so match on the stable prefix instead of the full class name
+function findBoardContainer() {
+    return document.querySelector('[class*="Board-module_boardContainer"]')
+}
 while (true) {
     await sleep(100)
-    console.log('checking for header')
+    console.log('checking for game board')
     if (document.getElementById('wordle-app-game') == null) continue
-    if (document.getElementsByTagName('header').length == 0) continue
-    if (!document.getElementsByTagName('header')[0].children) continue
-    console.log('found header')
+    let container = findBoardContainer()
+    if (!container || !container.children[0]) continue
+    if (document.querySelectorAll('button[data-key]').length == 0) continue
+    console.log('found game board')
     break
 }
 //console.log('done sleeping')
 
+// Find somewhere to show our status. The NYT header no longer has a visible title:
+// its only <h1> is "visually-hidden" (screen readers only), so writing to it shows
+// nothing. Instead, add our own element to the toolbar (a flex row: menu button,
+// hidden h1, icon menu) as a flexible middle item, or above the game if the
+// toolbar isn't there.
+let bossTitleEl = null
+function findTitleElement() {
+    let el = document.getElementById('wboss-title')
+    if (el) return el
+    el = document.createElement('div')
+    el.id = 'wboss-title'
+    el.style.cssText = 'font-weight:bold;font-size:18px;white-space:nowrap;' +
+        'color:var(--color-tone-1, inherit);'
+    let toolbar = document.querySelector('header [data-testid="toolbar"]')
+    if (toolbar) {
+        // NYT styles every "toolbar div" as display:flex with height:100%; use a
+        // block (so the ellipsis works) with auto height (so the toolbar centers it)
+        el.style.cssText += 'display:block;height:auto;flex:1 1 auto;min-width:0;overflow:hidden;' +
+            'text-overflow:ellipsis;text-align:left;padding:0 8px;'
+        // put it just before the right-hand icon menu (or at the end)
+        toolbar.insertBefore(el, toolbar.querySelector(':scope > menu'))
+        console.log('using wboss title in toolbar')
+    }
+    else {
+        el.style.cssText += 'text-align:center;padding:6px 0;'
+        let app = document.getElementById('wordle-app-game')
+        app.parentNode.insertBefore(el, app)
+        console.log('using wboss banner above game')
+    }
+    return el
+}
 function setBossTitle(title) {
-    document.getElementsByTagName('header')[0].children[1].textContent = title
+    try {
+        // the page may re-render and replace the element we found
+        if (!bossTitleEl || !bossTitleEl.isConnected) {
+            bossTitleEl = findTitleElement()
+        }
+        bossTitleEl.textContent = title
+    }
+    catch (error) {
+        console.log('failed to set title:', title, error)
+    }
 }
 
 setBossTitle('Wordle Boss')
@@ -50,7 +96,7 @@ setBossTitle('Wordle Boss')
 let app = document.getElementById('wordle-app-game')
 console.log('app:', app)
 //let boardContainer = document.getElementById('wordle-app-game').children[0]
-let boardContainer = document.getElementsByClassName('Board-module_boardContainer__TBHNL')[0]
+let boardContainer = findBoardContainer()
 console.log('boardContainer:', boardContainer)
 let board = boardContainer.children[0]
 console.log('board:', board)
@@ -69,7 +115,7 @@ for (let key of keys) {
     }
     key.addEventListener('click', e => {
         //console.log('click key:', key, 'letter:', letter)
-        if (key.textContent == 'enter') {
+        if (letter == '↵' || key.textContent.toLowerCase() == 'enter') {
             updateGuesses(3000)
         }
         else {
@@ -103,7 +149,8 @@ function updateGuessesNow() {
         return row.map((tile, colNum) => {
             //console.log(rowNum, colNum, tile)
             let letter = tile.textContent
-            let evaluation = tile.firstChild.getAttribute('data-state')
+            let stateEl = tile.querySelector('[data-state]') || tile
+            let evaluation = stateEl.getAttribute('data-state')
             return [ letter, evaluation ]
         })
     })
@@ -118,7 +165,7 @@ async function updateGuesses(delay) {
     updateGuessesNow()
 }
 
-updateGuesses(1000)
+await updateGuesses(1000)
 currentRow = getCurrentRow(guesses)
 currentCol = getCurrentCol(guesses)
 
@@ -135,6 +182,8 @@ function getCurrentRow(guesses) {
 
 function getCurrentCol(guesses) {
     let row = rowTiles[currentRow]
+    // game over (all rows used): no column to type into
+    if (!row) return -1
     for (let i = 0; i < row.length; i++) {
         let tile = row[i]
         //console.log(tile)
@@ -156,16 +205,16 @@ document.addEventListener('keydown', e => {
     else if (e.key == 'Enter') {
         updateGuesses(3000)
     }
-    else if (e.key.length == 1 && /[a-z]/.test(e.key)) {
+    else if (e.key.length == 1 && /[a-z]/i.test(e.key)) {
         //console.log('keydown:', e.key)
-        checkLetter(e.key)
+        checkLetter(e.key.toLowerCase())
     }
 })
 
 function checkLetter(letter) {
     currentRow = getCurrentRow(guesses)
     currentCol = getCurrentCol(guesses)
-    if (currentCol < 0) {
+    if (finished || currentCol < 0) {
         return false
     }
     let r = checkWrongLetter(letter) 
@@ -211,7 +260,7 @@ function checkWrongLetter(letter) {
     return absents > 0 && presents < 1 
 }
 function findPossibleChoices() {
-    if (!guesses) {
+    if (!guesses || guesses.length == 0) {
         console.log('no guesses yet')
         return words
     }
@@ -235,7 +284,7 @@ function findPossibleChoices() {
                     if (word.includes(letter)) {
                         // check if the letter repeats, may have a 'present' or 'correct'
                         let counts = row.filter(item => item[0] == letter && item[1] != 'absent')
-                        if (counts == 0) {
+                        if (counts.length == 0) {
                             absentCount++
                             return false
                         }
