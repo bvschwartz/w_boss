@@ -17,6 +17,10 @@
 const DEBUG = false
 const log = (...args) => { if (DEBUG) console.log('wboss:', ...args) }
 const FINAL_STATES = new Set(['absent', 'present', 'correct'])
+const KNOWN_STATES = new Set(['empty', 'tbd', 'absent', 'present', 'correct'])
+// screen-reader label on a played tile, e.g. "1st letter, C, present in another position"
+const ARIA_RE = /letter, ([A-Z]), (absent|present in another position|correct)$/i
+const ARIA_STATE = { 'absent': 'absent', 'present in another position': 'present', 'correct': 'correct' }
 
 async function main() {
 
@@ -59,6 +63,50 @@ function readBoard() {
             letter: tile.textContent.trim().toLowerCase(),
             state: tile.getAttribute('data-state'),
         })))
+}
+
+// ---------- page-change detection ----------
+
+// Checks the parts of NYT's page that wboss depends on. Returns a short
+// description of the first problem found, or null if everything looks as expected.
+function checkPage() {
+    const container = document.querySelector('[class*="Board-module_boardContainer"]')
+    if (!container) return 'board container not found'
+    const board = container.children[0]
+    const rows = board ? Array.from(board.children) : []
+    if (rows.length != 6) return `expected 6 board rows, found ${rows.length}`
+    for (let r = 0; r < rows.length; r++) {
+        const tiles = Array.from(rows[r].querySelectorAll('[data-testid="tile"]'))
+        if (tiles.length != 5) return `row ${r + 1}: expected 5 tiles, found ${tiles.length}`
+        for (let c = 0; c < tiles.length; c++) {
+            const tile = tiles[c]
+            const where = `row ${r + 1}, tile ${c + 1}`
+            const text = tile.textContent.trim()
+            const state = tile.getAttribute('data-state')
+            if (!KNOWN_STATES.has(state)) return `${where}: unknown data-state "${state}"`
+            if (!/^[a-z]?$/i.test(text)) return `${where}: unexpected tile text "${text.slice(0, 30)}"`
+            if (FINAL_STATES.has(state) && !text) return `${where}: ${state} tile has no letter`
+            // cross-check against the screen-reader label when it's in the format we know
+            const m = ARIA_RE.exec(tile.getAttribute('aria-label') || '')
+            if (m && FINAL_STATES.has(state) &&
+                (m[1].toLowerCase() != text.toLowerCase() || ARIA_STATE[m[2].toLowerCase()] != state)) {
+                return `${where}: label "${m[0]}" disagrees with tile "${text}"/${state}`
+            }
+        }
+    }
+    const letterKeys = new Set(Array.from(document.querySelectorAll('button[data-key]'))
+        .map(k => k.getAttribute('data-key')).filter(k => /^[a-z]$/.test(k)))
+    if (letterKeys.size != 26) return `keyboard: found ${letterKeys.size} letter keys, expected 26`
+    return null
+}
+
+let pageProblem = null   // set while the page doesn't look the way wboss expects
+function reportProblem(problem) {
+    if (problem && problem != pageProblem) {
+        console.warn('wboss: NYT page changed? ' + problem +
+            ' -- word count and beeps are off until this is fixed')
+    }
+    pageProblem = problem
 }
 
 const isFinished = row => row.length == 5 && row.every(t => FINAL_STATES.has(t.state))
@@ -136,6 +184,12 @@ let lastKey = null       // finished rows, as a string, from the last update
 let finished = false
 
 function update() {
+    reportProblem(checkPage())
+    if (pageProblem) {
+        lastKey = null // recompute once the page looks right again
+        setBossTitle(`Wordle Boss: \u26a0 page changed (${pageProblem})`)
+        return
+    }
     const board = readBoard()
     const done = board.filter(isFinished)
     const key = done.map(r => r.map(t => t.letter + CODE[t.state]).join('')).join('|')
@@ -153,7 +207,15 @@ function update() {
     else {
         finished = rows.length >= 6
         const possible = filterWords(words, rows)
-        setBossTitle(`Wordle Boss: ${possible.length} words left`)
+        if (possible.length == 0 && rows.length > 0) {
+            // either the answer isn't in words.json or we're misreading the board
+            console.warn('wboss: no words left -- answer missing from words.json, or the board is being misread:',
+                rows.map(r => r.map(t => t.letter + '/' + t.state).join(' ')))
+            setBossTitle('Wordle Boss: 0 words left (\u26a0 see console)')
+        }
+        else {
+            setBossTitle(`Wordle Boss: ${possible.length} words left`)
+        }
         log('possible:', possible.length <= 50 ? possible : possible.length)
     }
     dimAbsentKeys()
@@ -168,7 +230,7 @@ function dimAbsentKeys() {
 // called *before* the game handles the key (capture phase), so the letter
 // isn't on the board yet
 function checkLetter(letter) {
-    if (finished) return
+    if (finished || pageProblem) return
     const board = readBoard()
     const current = board.find(row => !isFinished(row))
     if (!current) return
@@ -248,7 +310,20 @@ const audioLooking = new Audio(chrome.runtime.getURL('audio/heres-looking.mp3'))
 
 // ---------- wiring ----------
 
+// the board isn't there until you click Play, so only complain if the game
+// container is showing but the board still can't be found
+const boardWatchdog = setTimeout(() => {
+    if (document.getElementById('wordle-app-game')) {
+        reportProblem('game is showing but the board was not found after 30s')
+        setBossTitle(`Wordle Boss: \u26a0 page changed (${pageProblem})`)
+    }
+    else {
+        console.warn('wboss: still waiting for the Wordle board after 30s')
+    }
+}, 30000)
 await waitFor(findBoard)
+clearTimeout(boardWatchdog)
+reportProblem(null)
 log('found game board')
 setBossTitle('Wordle Boss')
 update()
